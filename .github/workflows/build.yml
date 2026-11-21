@@ -1,23 +1,54 @@
-name: Compilar APK
+name: Descomprimir y compilar APK
 
 on:
   push:
+    paths:
+      - 'Jornadas.zip'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Descomprimir Jornadas.zip en el repo
+        run: |
+          if [ -f Jornadas.zip ]; then
+            rm -rf /tmp/x && mkdir /tmp/x
+            unzip -q Jornadas.zip -d /tmp/x
+            SRC=/tmp/x
+            if [ "$(ls -A /tmp/x | wc -l)" = "1" ] && [ -d "/tmp/x/$(ls /tmp/x)" ]; then
+              SRC="/tmp/x/$(ls /tmp/x)"
+            fi
+            rm -rf "$SRC/.github"
+            find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github ! -name Jornadas.zip -exec rm -rf {} +
+            cp -a "$SRC"/. .
+            rm -f Jornadas.zip
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add -A
+            git commit -m "Descomprimir Jornadas.zip" || echo "Sin cambios"
+            git push
+          else
+            echo "No hay Jornadas.zip, se compila lo que hay en el repo"
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
+
       - name: Compilar
         run: gradle assembleDebug
+
       - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:
