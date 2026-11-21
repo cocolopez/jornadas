@@ -3,7 +3,10 @@ package com.perez.jornadas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,6 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.YearMonth
@@ -50,6 +55,7 @@ private fun dateTitle(d: LocalDate) = d.format(DateTimeFormatter.ofPattern("EEEE
 @Composable
 fun AppRoot(vm: MainVM) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshToday() }
     val tabs = listOf("Calendario" to Icons.Default.DateRange, "Resumen" to Icons.Default.CheckCircle, "Personas" to Icons.Default.Person)
     Scaffold(bottomBar = {
         NavigationBar {
@@ -120,9 +126,12 @@ fun CalendarScreen(vm: MainVM) {
     val m by vm.month.collectAsState()
     val persons by vm.persons.collectAsState()
     val days by vm.workdays.collectAsState()
+    val quick by vm.quick.collectAsState()
     var selected by remember { mutableStateOf<LocalDate?>(null) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
+        TodayCard(vm, persons)
+        QuickBar(vm, persons, quick)
         MonthHeader(vm)
         Row(Modifier.fillMaxWidth()) {
             listOf("L", "M", "M", "J", "V", "S", "D").forEach {
@@ -138,7 +147,12 @@ fun CalendarScreen(vm: MainVM) {
                     val n = r * 7 + c - offset + 1
                     if (n in 1..len) {
                         val d = m.atDay(n)
-                        DayCell(d, persons, days.filter { it.date == d.toEpochDay() }, Modifier.weight(1f)) { selected = d }
+                        val dayWorks = days.filter { it.date == d.toEpochDay() }
+                        DayCell(
+                            d, persons, dayWorks, Modifier.weight(1f),
+                            onClick = { if (quick.isEmpty()) selected = d else vm.quickMark(d, dayWorks) },
+                            onLongClick = { selected = d }
+                        )
                     } else Spacer(Modifier.weight(1f).height(60.dp))
                 }
             }
@@ -159,12 +173,56 @@ fun CalendarScreen(vm: MainVM) {
 }
 
 @Composable
-fun DayCell(date: LocalDate, persons: List<Person>, works: List<Workday>, modifier: Modifier, onClick: () -> Unit) {
+fun TodayCard(vm: MainVM, persons: List<Person>) {
+    val today by vm.today.collectAsState()
+    val works by vm.todayWorks.collectAsState()
+    var sheet by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Hoy: " + dateTitle(today), Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                IconButton(onClick = { sheet = true }) { Icon(Icons.Default.Edit, "Editar montos de hoy") }
+            }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                persons.forEach { p ->
+                    val on = works.any { it.personId == p.id }
+                    FilterChip(
+                        selected = on, onClick = { vm.toggle(p, today, !on) }, label = { Text(p.name) },
+                        leadingIcon = if (on) ({ Icon(Icons.Default.Check, null) }) else null
+                    )
+                }
+            }
+        }
+    }
+    if (sheet) DaySheet(vm, today, persons, works) { sheet = false }
+}
+
+@Composable
+fun QuickBar(vm: MainVM, persons: List<Person>, quick: Set<Long>) {
+    Text("Marcado rápido: elegí quién y tocá los días", style = MaterialTheme.typography.labelMedium)
+    Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        persons.forEachIndexed { i, p ->
+            FilterChip(
+                selected = p.id in quick, onClick = { vm.toggleQuick(p.id) }, label = { Text(p.name) },
+                leadingIcon = { Box(Modifier.size(10.dp).background(colorOf(i), CircleShape)) }
+            )
+        }
+    }
+    Text(
+        if (quick.isEmpty()) "Sin selección: tocá un día para editarlo."
+        else "Tocá un día para marcar o desmarcar. Mantené apretado para editar montos.",
+        style = MaterialTheme.typography.bodySmall
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun DayCell(date: LocalDate, persons: List<Person>, works: List<Workday>, modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit) {
     val has = works.isNotEmpty()
     Column(
         modifier.height(60.dp).padding(1.dp)
             .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), MaterialTheme.shapes.small)
-            .clickable(onClick = onClick).padding(4.dp)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(4.dp)
     ) {
         Text(date.dayOfMonth.toString(), fontWeight = if (has) FontWeight.Bold else FontWeight.Normal, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(4.dp))

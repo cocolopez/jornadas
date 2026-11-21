@@ -76,6 +76,26 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         dao.workdays(m.atDay(1).toEpochDay(), m.atEndOfMonth().toEpochDay())
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    // Marcado rápido: personas seleccionadas para marcar días con un toque
+    val quick = MutableStateFlow<Set<Long>>(emptySet())
+    fun toggleQuick(id: Long) { quick.value = if (id in quick.value) quick.value - id else quick.value + id }
+
+    // "Hoy"
+    val today = MutableStateFlow(LocalDate.now())
+    fun refreshToday() { today.value = LocalDate.now() }
+    val todayWorks = today.flatMapLatest { d -> dao.workdays(d.toEpochDay(), d.toEpochDay()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun quickMark(date: LocalDate, works: List<Workday>) = viewModelScope.launch {
+        val sel = persons.value.filter { it.id in quick.value }
+        val allHave = sel.isNotEmpty() && sel.all { p -> works.any { it.personId == p.id } }
+        sel.forEach { p ->
+            if (allHave) dao.deleteWorkday(p.id, date.toEpochDay())
+            else if (works.none { it.personId == p.id })
+                dao.upsertWorkday(Workday(personId = p.id, date = date.toEpochDay(), pay = p.dailyPay, expenses = p.dailyExpenses))
+        }
+    }
+
     init { viewModelScope.launch { seedOnce() } }
 
     /** Primera vez que se abre la app: carga los días del Excel (Perez2023.xlsx). */
