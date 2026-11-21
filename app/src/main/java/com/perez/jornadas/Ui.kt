@@ -1,9 +1,23 @@
 package com.perez.jornadas
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -12,22 +26,28 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import kotlinx.coroutines.delay
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.YearMonth
@@ -37,8 +57,8 @@ import java.util.Locale
 
 private val AR = Locale("es", "AR")
 private val palette = listOf(
-    Color(0xFF1E88E5), Color(0xFFE53935), Color(0xFF43A047),
-    Color(0xFFFB8C00), Color(0xFF8E24AA), Color(0xFF00897B)
+    Color(0xFF2F6DB5), Color(0xFFC4673A), Color(0xFF2F8F6B),
+    Color(0xFF8C6BB1), Color(0xFFB8893B), Color(0xFF5B6B7F)
 )
 private fun colorOf(i: Int) = palette[i % palette.size]
 private fun money(d: Double): String = NumberFormat.getCurrencyInstance(AR).format(d)
@@ -50,29 +70,94 @@ private fun fmtInput(d: Double): String = when {
 }
 private fun String.cap() = replaceFirstChar { it.uppercase() }
 private fun monthTitle(m: YearMonth) = m.month.getDisplayName(TextStyle.FULL, AR).cap() + " " + m.year
+/** Parte de viático que le toca a esta persona ese día: (viático del día) / (personas que van ese día). */
+private fun expOf(w: Workday, works: List<Workday>, ov: Map<Long, Double>, def: Double): Double {
+    val n = works.count { it.date == w.date }
+    return if (n == 0) 0.0 else (ov[w.date] ?: def) / n
+}
 private fun dateTitle(d: LocalDate) = d.format(DateTimeFormatter.ofPattern("EEEE d 'de' MMMM yyyy", AR)).cap()
+
+/* ---------- Raíz: header, pestañas animadas y pantalla de entrada ---------- */
 
 @Composable
 fun AppRoot(vm: MainVM) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var splash by rememberSaveable { mutableStateOf(true) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshToday() }
-    val tabs = listOf("Calendario" to Icons.Default.DateRange, "Resumen" to Icons.Default.CheckCircle, "Personas" to Icons.Default.Person)
-    Scaffold(bottomBar = {
-        NavigationBar {
-            tabs.forEachIndexed { i, (label, icon) ->
-                NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icon, null) }, label = { Text(label) })
+    LaunchedEffect(Unit) { delay(1500); splash = false }
+
+    val tabs = listOf(
+        Triple("Calendario", Icons.Rounded.CalendarMonth, "Marcá tus días de trabajo"),
+        Triple("Resumen", Icons.Rounded.Assessment, "Cuánto va sumando el mes"),
+        Triple("Personas", Icons.Rounded.Group, "Quién trabaja y sus tarifas")
+    )
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = { AppHeader(tabs[tab].third) },
+            bottomBar = {
+                NavigationBar {
+                    tabs.forEachIndexed { i, t ->
+                        NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(t.second, null) }, label = { Text(t.first) })
+                    }
+                }
+            }
+        ) { pad ->
+            AnimatedContent(
+                targetState = tab,
+                modifier = Modifier.padding(pad).fillMaxSize(),
+                transitionSpec = {
+                    val dir = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(tween(260)) { it * dir / 5 } + fadeIn(tween(260))) togetherWith
+                        (slideOutHorizontally(tween(200)) { -it * dir / 5 } + fadeOut(tween(160)))
+                },
+                label = "tabs"
+            ) { t ->
+                when (t) {
+                    0 -> CalendarScreen(vm)
+                    1 -> SummaryScreen(vm)
+                    else -> PeopleScreen(vm)
+                }
             }
         }
-    }) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            when (tab) {
-                0 -> CalendarScreen(vm)
-                1 -> SummaryScreen(vm)
-                else -> PeopleScreen(vm)
-            }
-        }
+        AnimatedVisibility(visible = splash, exit = fadeOut(tween(450))) { Splash() }
     }
 }
+
+/* ---------- Piezas reutilizables ---------- */
+
+@Composable
+fun Avatar(name: String, color: Color, size: Dp = 36.dp) {
+    Box(Modifier.size(size).background(color, CircleShape), contentAlignment = Alignment.Center) {
+        Text(name.trim().take(1).uppercase(), color = Color.White, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+fun Dot(color: Color, size: Dp = 9.dp) {
+    val s = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { s.animateTo(1f, spring(dampingRatio = 0.5f)) }
+    Box(Modifier.size(size).graphicsLayer { scaleX = s.value; scaleY = s.value }.background(color, CircleShape))
+}
+
+@Composable
+private fun animatedMoney(v: Double): String {
+    val a by animateFloatAsState(v.toFloat(), tween(600), label = "money")
+    return if (a == v.toFloat()) money(v) else money(a.toDouble())
+}
+
+@Composable
+fun Line(label: String, value: String, bold: Boolean = false, icon: ImageVector? = null) {
+    val w = if (bold) FontWeight.Bold else FontWeight.Normal
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (icon != null) { Icon(icon, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)) }
+        Text(label, Modifier.weight(1f), fontWeight = w)
+        Text(value, fontWeight = w)
+    }
+}
+
+@Composable
+fun MoneyLine(label: String, v: Double, bold: Boolean = false, icon: ImageVector? = null) =
+    Line(label, animatedMoney(v), bold, icon)
 
 /* ---------- Encabezado de mes ---------- */
 
@@ -80,10 +165,19 @@ fun AppRoot(vm: MainVM) {
 fun MonthHeader(vm: MainVM) {
     val m by vm.month.collectAsState()
     var pick by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        IconButton(onClick = { vm.month.value = m.minusMonths(1) }) { Icon(Icons.Default.ArrowBack, "Mes anterior") }
-        TextButton(onClick = { pick = true }) { Text(monthTitle(m), style = MaterialTheme.typography.titleLarge) }
-        IconButton(onClick = { vm.month.value = m.plusMonths(1) }) { Icon(Icons.Default.ArrowForward, "Mes siguiente") }
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { vm.month.value = m.minusMonths(1) }) { Icon(Icons.Rounded.ChevronLeft, "Mes anterior") }
+        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { pick = true }) {
+                AnimatedContent(targetState = m, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) }, label = "title") {
+                    Text(monthTitle(it), style = MaterialTheme.typography.titleLarge)
+                }
+            }
+            AnimatedVisibility(visible = m != YearMonth.now()) {
+                IconButton(onClick = { vm.month.value = YearMonth.now() }) { Icon(Icons.Rounded.Today, "Ir a hoy") }
+            }
+        }
+        IconButton(onClick = { vm.month.value = m.plusMonths(1) }) { Icon(Icons.Rounded.ChevronRight, "Mes siguiente") }
     }
     if (pick) MonthPicker(m, { pick = false }) { vm.month.value = it; pick = false }
 }
@@ -95,9 +189,9 @@ fun MonthPicker(current: YearMonth, onDismiss: () -> Unit, onPick: (YearMonth) -
         onDismissRequest = onDismiss,
         title = {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                IconButton(onClick = { year-- }) { Icon(Icons.Default.ArrowBack, "Año anterior") }
+                IconButton(onClick = { year-- }) { Icon(Icons.Rounded.ChevronLeft, "Año anterior") }
                 Text(year.toString())
-                IconButton(onClick = { year++ }) { Icon(Icons.Default.ArrowForward, "Año siguiente") }
+                IconButton(onClick = { year++ }) { Icon(Icons.Rounded.ChevronRight, "Año siguiente") }
             }
         },
         text = {
@@ -126,50 +220,73 @@ fun CalendarScreen(vm: MainVM) {
     val m by vm.month.collectAsState()
     val persons by vm.persons.collectAsState()
     val days by vm.workdays.collectAsState()
-    val quick by vm.quick.collectAsState()
-    var selected by remember { mutableStateOf<LocalDate?>(null) }
+    val selecting by vm.selecting.collectAsState()
+    val selected by vm.selected.collectAsState()
+    val assignees by vm.assignees.collectAsState()
+    var sheetDate by remember { mutableStateOf<LocalDate?>(null) }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
-        TodayCard(vm, persons)
-        QuickBar(vm, persons, quick)
-        MonthHeader(vm)
-        Row(Modifier.fillMaxWidth()) {
-            listOf("L", "M", "M", "J", "V", "S", "D").forEach {
-                Text(it, Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold)
-            }
-        }
-        val offset = m.atDay(1).dayOfWeek.value - 1
-        val len = m.lengthOfMonth()
-        val rows = (offset + len + 6) / 7
-        for (r in 0 until rows) {
-            Row(Modifier.fillMaxWidth()) {
-                for (c in 0..6) {
-                    val n = r * 7 + c - offset + 1
-                    if (n in 1..len) {
-                        val d = m.atDay(n)
-                        val dayWorks = days.filter { it.date == d.toEpochDay() }
-                        DayCell(
-                            d, persons, dayWorks, Modifier.weight(1f),
-                            onClick = { if (quick.isEmpty()) selected = d else vm.quickMark(d, dayWorks) },
-                            onLongClick = { selected = d }
-                        )
-                    } else Spacer(Modifier.weight(1f).height(60.dp))
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp)) {
+            TodayCard(vm, persons)
+            AnimatedVisibility(visible = !selecting) {
+                OutlinedButton(onClick = { vm.startSelecting(null) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Rounded.SelectAll, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Seleccionar varios días")
                 }
             }
-        }
-        Spacer(Modifier.height(12.dp))
-        // Leyenda
-        persons.forEachIndexed { i, p ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
-                Box(Modifier.size(12.dp).background(colorOf(i), CircleShape)); Spacer(Modifier.width(8.dp)); Text(p.name)
+            MonthHeader(vm)
+            Row(Modifier.fillMaxWidth()) {
+                listOf("L", "M", "M", "J", "V", "S", "D").forEach {
+                    Text(it, Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
+            AnimatedContent(
+                targetState = m,
+                transitionSpec = {
+                    val dir = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(tween(260)) { it * dir / 4 } + fadeIn(tween(260))) togetherWith
+                        (slideOutHorizontally(tween(200)) { -it * dir / 4 } + fadeOut(tween(160)))
+                },
+                label = "month"
+            ) { mm ->
+                Column {
+                    val offset = mm.atDay(1).dayOfWeek.value - 1
+                    val len = mm.lengthOfMonth()
+                    val rows = (offset + len + 6) / 7
+                    for (r in 0 until rows) {
+                        Row(Modifier.fillMaxWidth()) {
+                            for (c in 0..6) {
+                                val n = r * 7 + c - offset + 1
+                                if (n in 1..len) {
+                                    val d = mm.atDay(n)
+                                    val e = d.toEpochDay()
+                                    DayCell(
+                                        d, persons, days.filter { it.date == e }, e in selected, Modifier.weight(1f),
+                                        onClick = { if (selecting) vm.toggleSelected(e) else sheetDate = d },
+                                        onLongClick = { if (selecting) vm.toggleSelected(e) else vm.startSelecting(e) }
+                                    )
+                                } else Spacer(Modifier.weight(1f).height(60.dp))
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            TotalCard(vm, days)
+            Spacer(Modifier.height(if (selecting) 420.dp else 16.dp))
         }
-        Spacer(Modifier.height(12.dp))
-        TotalCard(days)
-        Spacer(Modifier.height(16.dp))
+
+        AnimatedVisibility(
+            visible = selecting,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically(tween(250)) { it } + fadeIn(tween(250)),
+            exit = slideOutVertically(tween(200)) { it } + fadeOut(tween(200))
+        ) { SelectionPanel(vm, persons, m, selected, assignees) }
     }
 
-    selected?.let { d -> DaySheet(vm, d, persons, days.filter { it.date == d.toEpochDay() }) { selected = null } }
+    sheetDate?.let { d -> DaySheet(vm, d, persons, days.filter { it.date == d.toEpochDay() }) { sheetDate = null } }
 }
 
 @Composable
@@ -177,18 +294,20 @@ fun TodayCard(vm: MainVM, persons: List<Person>) {
     val today by vm.today.collectAsState()
     val works by vm.todayWorks.collectAsState()
     var sheet by remember { mutableStateOf(false) }
-    Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-        Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 10.dp)) {
+    Card(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        Column(Modifier.padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Today, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.secondary)
+                Spacer(Modifier.width(8.dp))
                 Text("Hoy: " + dateTitle(today), Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                IconButton(onClick = { sheet = true }) { Icon(Icons.Default.Edit, "Editar montos de hoy") }
+                IconButton(onClick = { sheet = true }) { Icon(Icons.Rounded.Edit, "Editar montos de hoy") }
             }
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 persons.forEach { p ->
                     val on = works.any { it.personId == p.id }
                     FilterChip(
                         selected = on, onClick = { vm.toggle(p, today, !on) }, label = { Text(p.name) },
-                        leadingIcon = if (on) ({ Icon(Icons.Default.Check, null) }) else null
+                        leadingIcon = if (on) ({ Icon(Icons.Rounded.Check, null, Modifier.size(18.dp)) }) else null
                     )
                 }
             }
@@ -197,63 +316,144 @@ fun TodayCard(vm: MainVM, persons: List<Person>) {
     if (sheet) DaySheet(vm, today, persons, works) { sheet = false }
 }
 
-@Composable
-fun QuickBar(vm: MainVM, persons: List<Person>, quick: Set<Long>) {
-    Text("Marcado rápido: elegí quién y tocá los días", style = MaterialTheme.typography.labelMedium)
-    Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        persons.forEachIndexed { i, p ->
-            FilterChip(
-                selected = p.id in quick, onClick = { vm.toggleQuick(p.id) }, label = { Text(p.name) },
-                leadingIcon = { Box(Modifier.size(10.dp).background(colorOf(i), CircleShape)) }
-            )
-        }
-    }
-    Text(
-        if (quick.isEmpty()) "Sin selección: tocá un día para editarlo."
-        else "Tocá un día para marcar o desmarcar. Mantené apretado para editar montos.",
-        style = MaterialTheme.typography.bodySmall
-    )
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun DayCell(date: LocalDate, persons: List<Person>, works: List<Workday>, modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit) {
+fun DayCell(
+    date: LocalDate, persons: List<Person>, works: List<Workday>, selected: Boolean,
+    modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit
+) {
     val has = works.isNotEmpty()
+    val isToday = date == LocalDate.now()
+    val cs = MaterialTheme.colorScheme
+    val bg by animateColorAsState(
+        when { selected -> cs.primaryContainer; has -> cs.secondaryContainer; else -> Color.Transparent },
+        tween(250), label = "cellBg"
+    )
+    val shape = MaterialTheme.shapes.small
+    val borderColor = when { selected -> cs.primary; isToday -> cs.primary; else -> cs.outlineVariant }
     Column(
-        modifier.height(60.dp).padding(1.dp)
-            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), MaterialTheme.shapes.small)
+        modifier.height(60.dp).padding(1.5.dp).clip(shape).background(bg)
+            .border(BorderStroke(if (selected || isToday) 2.dp else 1.dp, borderColor), shape)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(4.dp)
     ) {
-        Text(date.dayOfMonth.toString(), fontWeight = if (has) FontWeight.Bold else FontWeight.Normal, style = MaterialTheme.typography.bodyMedium)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                date.dayOfMonth.toString(), Modifier.weight(1f),
+                fontWeight = if (has || isToday || selected) FontWeight.Bold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            if (selected) Icon(Icons.Rounded.Check, null, Modifier.size(14.dp), tint = cs.primary)
+        }
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             works.forEach { w ->
-                val i = persons.indexOfFirst { it.id == w.personId }
-                if (i >= 0) Box(Modifier.size(9.dp).background(colorOf(i), CircleShape))
+                key(w.personId) {
+                    val i = persons.indexOfFirst { it.id == w.personId }
+                    if (i >= 0) Dot(colorOf(i))
+                }
+            }
+        }
+    }
+}
+
+/** Panel inferior para asignar personas (y montos opcionales) a todos los días seleccionados. */
+@Composable
+fun SelectionPanel(vm: MainVM, persons: List<Person>, month: YearMonth, selected: Set<Long>, assignees: Set<Long>) {
+    var showAmounts by remember { mutableStateOf(false) }
+    var pay by remember { mutableStateOf("") }
+    var exp by remember { mutableStateOf("") }
+    val monthDays = (1..month.lengthOfMonth()).map { month.atDay(it) }
+    val ready = selected.isNotEmpty() && assignees.isNotEmpty()
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp, shadowElevation = 16.dp,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (selected.isEmpty()) "Tocá los días para elegirlos" else "${selected.size} días elegidos",
+                    Modifier.weight(1f), style = MaterialTheme.typography.titleSmall
+                )
+                IconButton(onClick = { vm.exitSelecting() }) { Icon(Icons.Rounded.Close, "Salir de la selección") }
+            }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = { vm.setSelected(monthDays.filter { it.dayOfWeek.value <= 5 }.map { it.toEpochDay() }.toSet()) }, label = { Text("Lun a Vie") })
+                AssistChip(onClick = { vm.setSelected(monthDays.filter { it.dayOfWeek.value >= 6 }.map { it.toEpochDay() }.toSet()) }, label = { Text("Sáb y Dom") })
+                AssistChip(onClick = { vm.setSelected(monthDays.map { it.toEpochDay() }.toSet()) }, label = { Text("Todo el mes") })
+                AssistChip(onClick = { vm.setSelected(emptySet()) }, label = { Text("Ninguno") })
+            }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("¿Quién va?", style = MaterialTheme.typography.labelLarge)
+                persons.forEachIndexed { i, p ->
+                    FilterChip(
+                        selected = p.id in assignees, onClick = { vm.toggleAssignee(p.id) }, label = { Text(p.name) },
+                        leadingIcon = {
+                            if (p.id in assignees) Icon(Icons.Rounded.Check, null, Modifier.size(18.dp))
+                            else Box(Modifier.size(10.dp).background(colorOf(i), CircleShape))
+                        }
+                    )
+                }
+            }
+            TextButton(onClick = { showAmounts = !showAmounts }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Icon(Icons.Rounded.Payments, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (showAmounts) "Ocultar montos" else "Fijar montos para estos días (opcional)")
+            }
+            AnimatedVisibility(visible = showAmounts) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(pay, { pay = it }, label = { Text("Pago") }, singleLine = true,
+                            leadingIcon = { Icon(Icons.Rounded.Payments, null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                        OutlinedTextField(exp, { exp = it }, label = { Text("Viático del día") }, singleLine = true,
+                            leadingIcon = { Icon(Icons.Rounded.ReceiptLong, null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                    }
+                    Text("Pago: vacío usa la tarifa de la persona. Viático del día: total que se reparte entre los que van; vacío no lo cambia.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { exp.toAmount()?.let { vm.setSelectedDayExpense(it) } },
+                            enabled = selected.isNotEmpty() && exp.toAmount() != null
+                        ) { Text("Solo fijar viático") }
+                        TextButton(onClick = { vm.clearSelectedDayExpense() }, enabled = selected.isNotEmpty()) { Text("Viático estándar") }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { vm.assign(pay.toAmount(), exp.toAmount()) }, enabled = ready, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.PersonAdd, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Asignar")
+                }
+                OutlinedButton(onClick = { vm.unassign() }, enabled = ready, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.PersonRemove, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Quitar")
+                }
             }
         }
     }
 }
 
 @Composable
-fun TotalCard(days: List<Workday>) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), modifier = Modifier.fillMaxWidth()) {
+fun TotalCard(vm: MainVM, days: List<Workday>) {
+    val ov by vm.dayExpenses.collectAsState()
+    val def by vm.defaultExpense.collectAsState()
+    val pay = days.sumOf { it.pay }
+    val exp = days.sumOf { expOf(it, days, ov, def) }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text("Total del mes", style = MaterialTheme.typography.titleMedium)
-            Line("Días cargados", days.size.toString())
-            Line("Pago", money(days.sumOf { it.pay }))
-            Line("Viáticos", money(days.sumOf { it.expenses }))
-            HorizontalDivider(Modifier.padding(vertical = 6.dp))
-            Line("Total", money(days.sumOf { it.pay + it.expenses }), bold = true)
+            Text("Total del mes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Line("Días cargados", days.size.toString(), icon = Icons.Rounded.CalendarMonth)
+            MoneyLine("Pago", pay, icon = Icons.Rounded.Payments)
+            MoneyLine("Viáticos", exp, icon = Icons.Rounded.ReceiptLong)
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            MoneyLine("Total", pay + exp, bold = true)
         }
-    }
-}
-
-@Composable
-fun Line(label: String, value: String, bold: Boolean = false) {
-    val w = if (bold) FontWeight.Bold else FontWeight.Normal
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, fontWeight = w); Text(value, fontWeight = w)
     }
 }
 
@@ -262,6 +462,11 @@ fun Line(label: String, value: String, bold: Boolean = false) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DaySheet(vm: MainVM, date: LocalDate, persons: List<Person>, works: List<Workday>, onClose: () -> Unit) {
+    val ov by vm.dayExpenses.collectAsState()
+    val def by vm.defaultExpense.collectAsState()
+    val e = date.toEpochDay()
+    val dayTotal = ov[e] ?: def
+    val n = works.size
     ModalBottomSheet(onDismissRequest = onClose) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState())) {
             Text(dateTitle(date), style = MaterialTheme.typography.titleLarge)
@@ -271,7 +476,24 @@ fun DaySheet(vm: MainVM, date: LocalDate, persons: List<Person>, works: List<Wor
                 PersonDayRow(vm, date, p, colorOf(i), works.firstOrNull { it.personId == p.id })
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            Line("Total del día", money(works.sumOf { it.pay + it.expenses }), bold = true)
+            var expText by remember(e) { mutableStateOf(ov[e]?.let { fmtInput(it) } ?: "") }
+            OutlinedTextField(
+                expText, { expText = it; vm.setDayExpense(e, it.toAmount()) },
+                label = { Text("Viático del día (total)") },
+                placeholder = { Text(fmtInput(def)) },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Rounded.ReceiptLong, null) },
+                supportingText = {
+                    Text(
+                        if (n > 0) "Se reparte entre $n: ${money(dayTotal / n)} cada uno. Vacío = viático estándar."
+                        else "Todavía no hay nadie asignado. Vacío = viático estándar (${money(def)})."
+                    )
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            MoneyLine("Total del día", works.sumOf { it.pay } + if (n > 0) dayTotal else 0.0, bold = true)
         }
     }
 }
@@ -280,22 +502,23 @@ fun DaySheet(vm: MainVM, date: LocalDate, persons: List<Person>, works: List<Wor
 fun PersonDayRow(vm: MainVM, date: LocalDate, p: Person, color: Color, w: Workday?) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { vm.toggle(p, date, w == null) }) {
         Checkbox(checked = w != null, onCheckedChange = { vm.toggle(p, date, it) })
-        Box(Modifier.size(10.dp).background(color, CircleShape)); Spacer(Modifier.width(8.dp))
+        Avatar(p.name, color, 28.dp)
+        Spacer(Modifier.width(10.dp))
         Text(p.name, style = MaterialTheme.typography.titleMedium)
     }
-    if (w != null) {
-        var pay by remember(w.id) { mutableStateOf(fmtInput(w.pay)) }
-        var exp by remember(w.id) { mutableStateOf(fmtInput(w.expenses)) }
-        var note by remember(w.id) { mutableStateOf(w.note) }
-        fun save() = vm.saveWorkday(w.copy(pay = pay.toAmount() ?: 0.0, expenses = exp.toAmount() ?: 0.0, note = note))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)) {
-            OutlinedTextField(pay, { pay = it; save() }, label = { Text("Pago") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
-            OutlinedTextField(exp, { exp = it; save() }, label = { Text("Viáticos") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+    AnimatedVisibility(visible = w != null) {
+        if (w != null) {
+            var pay by remember(w.id) { mutableStateOf(fmtInput(w.pay)) }
+            var note by remember(w.id) { mutableStateOf(w.note) }
+            fun save() = vm.saveWorkday(w.copy(pay = pay.toAmount() ?: 0.0, note = note))
+            Row(Modifier.padding(start = 12.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(pay, { pay = it; save() }, label = { Text("Pago") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Rounded.Payments, null) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                OutlinedTextField(note, { note = it; save() }, label = { Text("Lugar / nota") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Rounded.Place, null) }, modifier = Modifier.weight(1f))
+            }
         }
-        OutlinedTextField(note, { note = it; save() }, label = { Text("Lugar / nota") }, singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, bottom = 8.dp))
     }
 }
 
@@ -305,26 +528,31 @@ fun PersonDayRow(vm: MainVM, date: LocalDate, p: Person, color: Color, w: Workda
 fun SummaryScreen(vm: MainVM) {
     val persons by vm.persons.collectAsState()
     val days by vm.workdays.collectAsState()
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+    val ov by vm.dayExpenses.collectAsState()
+    val def by vm.defaultExpense.collectAsState()
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp)) {
         MonthHeader(vm)
         persons.forEachIndexed { i, p ->
             val ws = days.filter { it.personId == p.id }
+            val pay = ws.sumOf { it.pay }
+            val exp = ws.sumOf { expOf(it, days, ov, def) }
             Card(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(12.dp).background(colorOf(i), CircleShape)); Spacer(Modifier.width(8.dp))
-                        Text(p.name, style = MaterialTheme.typography.titleMedium)
+                        Avatar(p.name, colorOf(i), 36.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(p.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Line("Días trabajados", ws.size.toString())
-                    Line("Pago", money(ws.sumOf { it.pay }))
-                    Line("Viáticos", money(ws.sumOf { it.expenses }))
-                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                    Line("Total", money(ws.sumOf { it.pay + it.expenses }), bold = true)
+                    Spacer(Modifier.height(8.dp))
+                    Line("Días trabajados", ws.size.toString(), icon = Icons.Rounded.CalendarMonth)
+                    MoneyLine("Pago", pay, icon = Icons.Rounded.Payments)
+                    MoneyLine("Viáticos (su parte)", exp, icon = Icons.Rounded.ReceiptLong)
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    MoneyLine("Total", pay + exp, bold = true)
                 }
             }
         }
-        TotalCard(days)
+        TotalCard(vm, days)
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -339,25 +567,68 @@ fun PeopleScreen(vm: MainVM) {
     var deleting by remember { mutableStateOf<Person?>(null) }
 
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (persons.isEmpty()) {
+            Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Rounded.Group, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.outline)
+                Spacer(Modifier.height(12.dp))
+                Text("Todavía no hay personas", style = MaterialTheme.typography.titleMedium)
+                Text("Agregá a quien trabaja para empezar a marcar días.", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                val def by vm.defaultExpense.collectAsState()
+                var txt by remember { mutableStateOf(fmtInput(def)) }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.ReceiptLong, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.secondary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Viático estándar por día", style = MaterialTheme.typography.titleSmall)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            txt, { txt = it; vm.setDefaultExpense(it.toAmount() ?: 0.0) },
+                            label = { Text("Total por día") }, singleLine = true,
+                            leadingIcon = { Icon(Icons.Rounded.Payments, null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Se reparte entre las personas que van ese día: si van los dos, cada uno la mitad. Cada día se puede cambiar.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
             items(persons, key = { it.id }) { p ->
                 val i = persons.indexOf(p)
                 Card(Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(12.dp).background(colorOf(i), CircleShape)); Spacer(Modifier.width(12.dp))
+                    Row(Modifier.padding(start = 16.dp, top = 10.dp, bottom = 10.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(p.name, colorOf(i), 44.dp)
+                        Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(p.name, style = MaterialTheme.typography.titleMedium)
-                            Text("Pago/día: ${money(p.dailyPay)}  ·  Viáticos/día: ${money(p.dailyExpenses)}", style = MaterialTheme.typography.bodySmall)
+                            Text(p.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(2.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.Payments, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.secondary)
+                                Spacer(Modifier.width(4.dp))
+                                Text(money(p.dailyPay) + "/día", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
-                        IconButton(onClick = { editing = p }) { Icon(Icons.Default.Edit, "Editar") }
-                        IconButton(onClick = { deleting = p }) { Icon(Icons.Default.Delete, "Borrar") }
+                        IconButton(onClick = { editing = p }) { Icon(Icons.Rounded.Edit, "Editar") }
+                        IconButton(onClick = { deleting = p }) { Icon(Icons.Rounded.Delete, "Borrar") }
                     }
                 }
             }
         }
-        FloatingActionButton(onClick = { adding = true }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
-            Icon(Icons.Default.Add, "Agregar persona")
-        }
+        ExtendedFloatingActionButton(
+            onClick = { adding = true },
+            icon = { Icon(Icons.Rounded.PersonAdd, null) },
+            text = { Text("Agregar") },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+        )
     }
 
     if (adding) PersonDialog(null, { adding = false }) { p, _ -> vm.savePerson(p, false); adding = false }
@@ -365,6 +636,7 @@ fun PeopleScreen(vm: MainVM) {
     deleting?.let { d ->
         AlertDialog(
             onDismissRequest = { deleting = null },
+            icon = { Icon(Icons.Rounded.Delete, null) },
             title = { Text("¿Borrar a ${d.name}?") },
             text = { Text("También se borran todos los días cargados de esta persona.") },
             confirmButton = { TextButton(onClick = { vm.deletePerson(d); deleting = null }) { Text("Borrar") } },
@@ -377,27 +649,27 @@ fun PeopleScreen(vm: MainVM) {
 fun PersonDialog(p: Person?, onDismiss: () -> Unit, onSave: (Person, Boolean) -> Unit) {
     var name by remember { mutableStateOf(p?.name ?: "") }
     var pay by remember { mutableStateOf(fmtInput(p?.dailyPay ?: 0.0)) }
-    var exp by remember { mutableStateOf(fmtInput(p?.dailyExpenses ?: 0.0)) }
     var apply by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        icon = { Icon(if (p == null) Icons.Rounded.PersonAdd else Icons.Rounded.Edit, null) },
         title = { Text(if (p == null) "Nueva persona" else "Editar persona") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, singleLine = true)
+                OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Rounded.Person, null) })
                 OutlinedTextField(pay, { pay = it }, label = { Text("Pago por día") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                OutlinedTextField(exp, { exp = it }, label = { Text("Viáticos por día") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Rounded.Payments, null) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                 if (p != null) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable { apply = !apply }) {
                     Checkbox(apply, { apply = it })
-                    Text("Aplicar estas tarifas también a los días ya cargados", style = MaterialTheme.typography.bodySmall)
+                    Text("Aplicar este pago también a los días ya cargados", style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
         confirmButton = {
             TextButton(enabled = name.isNotBlank(), onClick = {
-                onSave((p ?: Person(name = "")).copy(name = name.trim(), dailyPay = pay.toAmount() ?: 0.0, dailyExpenses = exp.toAmount() ?: 0.0), apply)
+                onSave((p ?: Person(name = "")).copy(name = name.trim(), dailyPay = pay.toAmount() ?: 0.0, dailyExpenses = p?.dailyExpenses ?: 0.0), apply)
             }) { Text("Guardar") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
