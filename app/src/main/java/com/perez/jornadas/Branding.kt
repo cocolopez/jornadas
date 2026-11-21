@@ -8,8 +8,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,25 +32,27 @@ fun Logo(size: Dp, modifier: Modifier = Modifier) {
     Image(painterResource(R.drawable.ic_logo), contentDescription = "Jornadas", modifier = modifier.size(size))
 }
 
-/** Barra superior con el logo y el nombre de la pantalla actual. */
+/** Encabezado con degradado y esquinas redondeadas. */
 @Composable
 fun AppHeader(subtitle: String) {
     val ctx = LocalContext.current
     val version = remember {
         try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "" } catch (e: Exception) { "" }
     }
-    Surface(color = Navy) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Logo(36.dp)
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text("Jornadas", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+    Box(Modifier.fillMaxWidth().background(BrandBrush, RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Logo(46.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Jornadas", color = Color.White, style = MaterialTheme.typography.headlineSmall)
                 AnimatedContent(targetState = subtitle, label = "subtitle") {
-                    Text(it, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelMedium)
+                    Text(it, color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Text("v$version", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.labelSmall)
+            Text("v$version", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -68,7 +70,7 @@ fun Splash() {
         textAlpha.animateTo(1f, tween(500))
     }
     Box(
-        Modifier.fillMaxSize().background(Navy).pointerInput(Unit) {},
+        Modifier.fillMaxSize().background(BrandBrush).pointerInput(Unit) {},
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -77,8 +79,8 @@ fun Splash() {
             })
             Spacer(Modifier.height(20.dp))
             Column(Modifier.graphicsLayer { alpha = textAlpha.value }, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Jornadas", color = Color.White, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("Tus días de trabajo, en orden", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+                Text("Jornadas", color = Color.White, style = MaterialTheme.typography.headlineMedium)
+                Text("Tus días de trabajo, en orden", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.bodyMedium)
             }
         }
     }

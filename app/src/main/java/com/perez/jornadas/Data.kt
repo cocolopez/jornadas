@@ -19,8 +19,17 @@ data class Person(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
     val dailyPay: Double = 0.0,       // lo que te pagan por día
-    val dailyExpenses: Double = 0.0   // viáticos por día
+    val dailyExpenses: Double = 0.0,  // (sin uso: el viático ahora es un total por día)
+    val weekdayPays: String = ""      // pago por día de la semana, lun..dom separados por coma; vacío = pago base
 )
+
+/** Pagos por día de la semana (lunes=0 ... domingo=6). null = usa el pago base. */
+fun Person.weekdayRates(): List<Double?> {
+    val parts = weekdayPays.split(",")
+    return (0..6).map { parts.getOrNull(it)?.trim()?.toDoubleOrNull() }
+}
+/** Pago que le toca a esta persona en una fecha: el del día de la semana si lo hay, si no el base. */
+fun Person.payFor(date: LocalDate): Double = weekdayRates()[date.dayOfWeek.value - 1] ?: dailyPay
 
 @Entity(
     tableName = "workday",
@@ -56,6 +65,7 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorkday(w: Workday)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertWorkdays(list: List<Workday>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorkdays(list: List<Workday>)
+    @Query("SELECT * FROM workday WHERE personId = :pid") suspend fun workdaysOfPerson(pid: Long): List<Workday>
     @Query("SELECT * FROM day_expense") fun dayExpenses(): Flow<List<DayExpense>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setDayExpense(e: DayExpense)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setDayExpenses(list: List<DayExpense>)
@@ -74,14 +84,20 @@ private val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-@Database(entities = [Person::class, Workday::class, DayExpense::class], version = 2, exportSchema = false)
+private val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE person ADD COLUMN weekdayPays TEXT NOT NULL DEFAULT ''")
+    }
+}
+
+@Database(entities = [Person::class, Workday::class, DayExpense::class], version = 3, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): AppDao
     companion object {
         @Volatile private var inst: AppDb? = null
         fun get(c: Context): AppDb = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(c.applicationContext, AppDb::class.java, "jornadas.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build().also { inst = it }
         }
     }
@@ -130,11 +146,18 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         val out = ArrayList<Workday>()
         for (d in days) for (p in people) {
             val cur = existing.firstOrNull { it.date == d && it.personId == p.id }
-            out += if (cur == null) Workday(personId = p.id, date = d, pay = pay ?: p.dailyPay, expenses = 0.0)
+            out += if (cur == null) Workday(personId = p.id, date = d, pay = pay ?: p.payFor(LocalDate.ofEpochDay(d)), expenses = 0.0)
             else cur.copy(pay = pay ?: cur.pay)
         }
         dao.upsertWorkdays(out)
         if (dayExp != null) dao.setDayExpenses(days.map { DayExpense(it, dayExp) })
+    }
+
+    /** Cambia solo el pago de las personas elegidas en los días elegidos donde ya van. */
+    fun setPayOnExisting(pay: Double) = viewModelScope.launch {
+        val ids = assignees.value
+        val list = dao.workdaysOn(selected.value.toList()).filter { it.personId in ids }.map { it.copy(pay = pay) }
+        if (list.isNotEmpty()) dao.upsertWorkdays(list)
     }
 
     fun unassign() = viewModelScope.launch {
@@ -169,7 +192,7 @@ class MainVM(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggle(p: Person, date: LocalDate, on: Boolean) = viewModelScope.launch {
-        if (on) dao.upsertWorkday(Workday(personId = p.id, date = date.toEpochDay(), pay = p.dailyPay, expenses = 0.0))
+        if (on) dao.upsertWorkday(Workday(personId = p.id, date = date.toEpochDay(), pay = p.payFor(date), expenses = 0.0))
         else dao.deleteWorkday(p.id, date.toEpochDay())
     }
 
@@ -177,7 +200,10 @@ class MainVM(app: Application) : AndroidViewModel(app) {
 
     fun savePerson(p: Person, applyToExisting: Boolean) = viewModelScope.launch {
         val id = if (p.id == 0L) dao.insertPerson(p) else { dao.updatePerson(p); p.id }
-        if (applyToExisting) dao.applyRates(id, p.dailyPay, p.dailyExpenses)
+        if (applyToExisting) {
+            val person = p.copy(id = id)
+            dao.upsertWorkdays(dao.workdaysOfPerson(id).map { it.copy(pay = person.payFor(LocalDate.ofEpochDay(it.date))) })
+        }
     }
 
     fun deletePerson(p: Person) = viewModelScope.launch { dao.deletePerson(p) }
