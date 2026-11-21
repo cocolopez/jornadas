@@ -1,5 +1,9 @@
 package com.perez.jornadas
 
+import android.content.Intent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -40,6 +44,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -48,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.delay
+import java.io.File
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.YearMonth
@@ -74,10 +81,11 @@ private fun fmtInput(d: Double): String = when {
 private fun String.cap() = replaceFirstChar { it.uppercase() }
 private fun monthTitle(m: YearMonth) = m.month.getDisplayName(TextStyle.FULL, AR).cap() + " " + m.year
 /** Parte de viático que le toca a esta persona ese día: (viático del día) / (personas que van ese día). */
-private fun expOf(w: Workday, works: List<Workday>, ov: Map<Long, Double>, def: Double): Double {
-    val n = works.count { it.date == w.date }
+private fun expOf(w: Workday, counts: Map<Long, Int>, ov: Map<Long, Double>, def: Double): Double {
+    val n = counts[w.date] ?: 0
     return if (n == 0) 0.0 else (ov[w.date] ?: def) / n
 }
+private fun countsOf(works: List<Workday>): Map<Long, Int> = works.groupingBy { it.date }.eachCount()
 private fun dateTitle(d: LocalDate) = d.format(DateTimeFormatter.ofPattern("EEEE d 'de' MMMM yyyy", AR)).cap()
 
 /* ---------- Raíz: header, pestañas animadas y pantalla de entrada ---------- */
@@ -91,7 +99,8 @@ fun AppRoot(vm: MainVM) {
 
     val tabs = listOf(
         Triple("Calendario", Icons.Rounded.CalendarMonth, "Marcá tus días de trabajo"),
-        Triple("Resumen", Icons.Rounded.Assessment, "Cuánto va sumando el mes"),
+        Triple("Planilla", Icons.Rounded.TableChart, "Pago y viático de cada día"),
+        Triple("Resumen", Icons.Rounded.Assessment, "Totales por persona"),
         Triple("Personas", Icons.Rounded.Group, "Quién trabaja y sus tarifas")
     )
     Box(Modifier.fillMaxSize()) {
@@ -124,7 +133,8 @@ fun AppRoot(vm: MainVM) {
             ) { t ->
                 when (t) {
                     0 -> CalendarScreen(vm)
-                    1 -> SummaryScreen(vm)
+                    1 -> PlanillaScreen(vm)
+                    2 -> SummaryScreen(vm)
                     else -> PeopleScreen(vm)
                 }
             }
@@ -481,13 +491,14 @@ fun SelectionPanel(vm: MainVM, persons: List<Person>, month: YearMonth, selected
 }
 
 @Composable
-fun TotalCard(vm: MainVM, days: List<Workday>) {
+fun TotalCard(vm: MainVM, days: List<Workday>, title: String = "Total del mes") {
     val ov by vm.dayExpenses.collectAsState()
     val def by vm.defaultExpense.collectAsState()
     val pay = days.sumOf { it.pay }
-    val exp = days.sumOf { expOf(it, days, ov, def) }
+    val counts = remember(days) { countsOf(days) }
+    val exp = days.sumOf { expOf(it, counts, ov, def) }
     Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(BrandBrush).padding(20.dp)) {
-        Text("Total del mes", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
+        Text(title, color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelLarge)
         Text(animatedMoney(pay + exp), color = Color.White, style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(14.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -568,17 +579,34 @@ fun PersonDayRow(vm: MainVM, date: LocalDate, p: Person, color: Color, w: Workda
 @Composable
 fun SummaryScreen(vm: MainVM) {
     val persons by vm.persons.collectAsState()
-    val days by vm.workdays.collectAsState()
+    val monthDays by vm.workdays.collectAsState()
+    val allDays by vm.allWorkdays.collectAsState()
     val ov by vm.dayExpenses.collectAsState()
     val def by vm.defaultExpense.collectAsState()
+    var all by rememberSaveable { mutableStateOf(false) }
+    var export by remember { mutableStateOf(false) }
+    val days = if (all) allDays else monthDays
+    val counts = remember(days) { countsOf(days) }
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
-        MonthHeader(vm)
-        TotalCard(vm, days)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            FilterChip(selected = !all, onClick = { all = false }, label = { Text("Este mes") })
+            Spacer(Modifier.width(8.dp))
+            FilterChip(selected = all, onClick = { all = true }, label = { Text("Todo el historial") })
+            Spacer(Modifier.weight(1f))
+            FilledTonalButton(onClick = { export = true }, contentPadding = PaddingValues(horizontal = 14.dp)) {
+                Icon(Icons.Rounded.FileDownload, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Excel")
+            }
+        }
+        if (!all) MonthHeader(vm) else Spacer(Modifier.height(12.dp))
+        TotalCard(vm, days, if (all) "Total de todos los días" else "Total del mes")
         Spacer(Modifier.height(16.dp))
         persons.forEachIndexed { i, p ->
             val ws = days.filter { it.personId == p.id }
             val pay = ws.sumOf { it.pay }
-            val exp = ws.sumOf { expOf(it, days, ov, def) }
+            val exp = ws.sumOf { expOf(it, counts, ov, def) }
             SoftCard(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -598,11 +626,24 @@ fun SummaryScreen(vm: MainVM) {
                         MiniStat(Icons.Rounded.Payments, "Pago", animatedMoney(pay, short = true), MaterialTheme.colorScheme.primary, Modifier.weight(1f))
                         MiniStat(Icons.Rounded.ReceiptLong, "Viáticos", animatedMoney(exp, short = true), MaterialTheme.colorScheme.secondary, Modifier.weight(1f))
                     }
+                    if (all && ws.isNotEmpty()) {
+                        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                        Text("Mes por mes", style = MaterialTheme.typography.labelLarge)
+                        Spacer(Modifier.height(4.dp))
+                        ws.groupBy { YearMonth.from(LocalDate.ofEpochDay(it.date)) }
+                            .entries.sortedByDescending { it.key }
+                            .forEach { (ym, list) ->
+                                val mp = list.sumOf { it.pay }
+                                val me = list.sumOf { expOf(it, counts, ov, def) }
+                                Line(monthTitle(ym) + " · " + list.size + (if (list.size == 1) " día" else " días"), money(mp + me))
+                            }
+                    }
                 }
             }
         }
         Spacer(Modifier.height(8.dp))
     }
+    if (export) ExportDialog(vm, startAll = all) { export = false }
 }
 
 /* ---------- Personas ---------- */
@@ -752,6 +793,143 @@ fun PersonDialog(p: Person?, onDismiss: () -> Unit, onSave: (Person, Boolean) ->
                     apply
                 )
             }) { Text("Guardar") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+/* ---------- Planilla: cada día con su pago y su viático editable ---------- */
+
+@Composable
+fun PlanillaScreen(vm: MainVM) {
+    val persons by vm.persons.collectAsState()
+    val days by vm.workdays.collectAsState()
+    val ov by vm.dayExpenses.collectAsState()
+    val def by vm.defaultExpense.collectAsState()
+    var sheetDate by remember { mutableStateOf<LocalDate?>(null) }
+    val dates = remember(days) { days.map { it.date }.distinct().sorted() }
+
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { MonthHeader(vm) }
+        LazyColumn(
+            Modifier.weight(1f), contentPadding = PaddingValues(16.dp, 0.dp, 16.dp, 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (dates.isEmpty()) item {
+                Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.TableChart, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(12.dp))
+                    Text("No hay días cargados en este mes", style = MaterialTheme.typography.titleMedium)
+                    Text("Marcalos en el Calendario y acá les ponés el viático de cada uno.", color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+            }
+            items(dates, key = { it }) { e ->
+                val d = LocalDate.ofEpochDay(e)
+                val works = days.filter { it.date == e }
+                val n = works.size
+                val total = ov[e] ?: def
+                SoftCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp)) {
+                        Row(Modifier.fillMaxWidth().clickable { sheetDate = d }, verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(d.format(DateTimeFormatter.ofPattern("EEEE d 'de' MMMM", AR)).cap(), style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    works.joinToString(" · ") { w -> (persons.firstOrNull { it.id == w.personId }?.name ?: "?") + " " + moneyShort(w.pay) },
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            works.forEach { w ->
+                                val i = persons.indexOfFirst { it.id == w.personId }
+                                if (i >= 0) { Avatar(persons[i].name, colorOf(i), 28.dp); Spacer(Modifier.width(4.dp)) }
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        var txt by remember(e) { mutableStateOf(ov[e]?.let { fmtInput(it) } ?: "") }
+                        OutlinedTextField(
+                            txt, { txt = it; vm.setDayExpense(e, it.toAmount()) },
+                            label = { Text("Viático del día (total)") },
+                            placeholder = { Text(fmtInput(def)) },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Rounded.ReceiptLong, null) },
+                            supportingText = {
+                                Text("Entre $n: ${money(total / n)} cada uno" + if (ov[e] == null) " (viático estándar)" else "")
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+            if (dates.isNotEmpty()) item { TotalCard(vm, days) }
+        }
+    }
+    sheetDate?.let { d -> DaySheet(vm, d, persons, days.filter { it.date == d.toEpochDay() }) { sheetDate = null } }
+}
+
+@Composable
+fun ExportDialog(vm: MainVM, startAll: Boolean, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val m by vm.month.collectAsState()
+    var all by remember { mutableStateOf(startAll) }
+    val mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    val fileName = if (all) "Jornadas_historial.xlsx" else "Jornadas_$m.xlsx"
+    val period = if (all) "Todo el historial" else monthTitle(m)
+    val bytes = { vm.buildExport(if (all) null else m, period) }
+
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mime)) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes()) }
+                Toast.makeText(ctx, "Archivo guardado", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "No se pudo guardar el archivo", Toast.LENGTH_LONG).show()
+            }
+        }
+        onDismiss()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.FileDownload, null) },
+        title = { Text("Exportar a Excel") },
+        text = {
+            Column {
+                Text(
+                    "Un archivo con una hoja por persona (cada día con su pago, viático y total), más un resumen general.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth().clickable { all = false }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = !all, onClick = { all = false })
+                    Text("Solo " + monthTitle(m))
+                }
+                Row(Modifier.fillMaxWidth().clickable { all = true }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = all, onClick = { all = true })
+                    Text("Todo el historial")
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = {
+                    try {
+                        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+                        val f = File(dir, fileName)
+                        f.writeBytes(bytes())
+                        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = mime
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        ctx.startActivity(Intent.createChooser(send, "Compartir planilla"))
+                    } catch (e: Exception) {
+                        Toast.makeText(ctx, "No se pudo compartir el archivo", Toast.LENGTH_LONG).show()
+                    }
+                    onDismiss()
+                }) { Text("Compartir") }
+                TextButton(onClick = { saver.launch(fileName) }) { Text("Guardar") }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
     )

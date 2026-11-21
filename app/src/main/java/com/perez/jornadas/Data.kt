@@ -66,6 +66,7 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertWorkdays(list: List<Workday>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorkdays(list: List<Workday>)
     @Query("SELECT * FROM workday WHERE personId = :pid") suspend fun workdaysOfPerson(pid: Long): List<Workday>
+    @Query("SELECT * FROM workday ORDER BY date") fun allWorkdays(): Flow<List<Workday>>
     @Query("SELECT * FROM day_expense") fun dayExpenses(): Flow<List<DayExpense>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setDayExpense(e: DayExpense)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setDayExpenses(list: List<DayExpense>)
@@ -125,6 +126,20 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         dao.setDayExpenses(selected.value.map { DayExpense(it, amount) })
     }
     fun clearSelectedDayExpense() = viewModelScope.launch { dao.clearDayExpenses(selected.value.toList()) }
+
+    // ----- Todo el historial + exportar -----
+    val allWorkdays = dao.allWorkdays().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Arma el .xlsx. month = null exporta todo el historial. */
+    fun buildExport(month: YearMonth?, period: String): ByteArray {
+        val all = allWorkdays.value
+        val ws = if (month == null) all else {
+            val from = month.atDay(1).toEpochDay()
+            val to = month.atEndOfMonth().toEpochDay()
+            all.filter { it.date in from..to }
+        }
+        return XlsxExporter.build(persons.value, ws, dayExpenses.value, defaultExpense.value, period)
+    }
 
     // ----- Selección de varios días -----
     val selecting = MutableStateFlow(false)
