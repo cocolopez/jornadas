@@ -55,6 +55,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.delay
 import java.io.File
+import java.time.Instant
+import java.time.ZoneOffset
 import java.text.NumberFormat
 import java.time.LocalDate
 import java.time.YearMonth
@@ -77,6 +79,11 @@ private fun fmtInput(d: Double): String = when {
     d == 0.0 -> ""
     d % 1.0 == 0.0 -> d.toLong().toString()
     else -> d.toString()
+}
+private fun fmtMult(m: Double): String = if (m % 1.0 == 0.0) m.toLong().toString() else m.toString().replace('.', ',')
+private fun specialDateText(s: SpecialDay): String {
+    val mn = java.time.Month.of(s.month).getDisplayName(TextStyle.FULL, AR)
+    return "${s.day} de $mn" + if (s.year == 0) " · todos los años" else " de ${s.year}"
 }
 private fun String.cap() = replaceFirstChar { it.uppercase() }
 private fun monthTitle(m: YearMonth) = m.month.getDisplayName(TextStyle.FULL, AR).cap() + " " + m.year
@@ -280,6 +287,7 @@ fun CalendarScreen(vm: MainVM) {
     val selecting by vm.selecting.collectAsState()
     val selected by vm.selected.collectAsState()
     val assignees by vm.assignees.collectAsState()
+    val specials by vm.specials.collectAsState()
     var sheetDate by remember { mutableStateOf<LocalDate?>(null) }
 
     Box(Modifier.fillMaxSize()) {
@@ -319,7 +327,7 @@ fun CalendarScreen(vm: MainVM) {
                                     val d = mm.atDay(n)
                                     val e = d.toEpochDay()
                                     DayCell(
-                                        d, persons, days.filter { it.date == e }, e in selected, Modifier.weight(1f),
+                                        d, persons, days.filter { it.date == e }, e in selected, specials.any { it.matches(d) }, Modifier.weight(1f),
                                         onClick = { if (selecting) vm.toggleSelected(e) else sheetDate = d },
                                         onLongClick = { if (selecting) vm.toggleSelected(e) else vm.startSelecting(e) }
                                     )
@@ -348,7 +356,7 @@ fun CalendarScreen(vm: MainVM) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DayCell(
-    date: LocalDate, persons: List<Person>, works: List<Workday>, selected: Boolean,
+    date: LocalDate, persons: List<Person>, works: List<Workday>, selected: Boolean, special: Boolean,
     modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit
 ) {
     val has = works.isNotEmpty()
@@ -365,16 +373,19 @@ fun DayCell(
             .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            Modifier.size(24.dp).background(if (isToday) cs.primary else Color.Transparent, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                date.dayOfMonth.toString(),
-                color = if (isToday) cs.onPrimary else cs.onSurface,
-                fontWeight = if (has || isToday || selected) FontWeight.Bold else FontWeight.Normal,
-                style = MaterialTheme.typography.bodyMedium
-            )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(24.dp).background(if (isToday) cs.primary else Color.Transparent, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    date.dayOfMonth.toString(),
+                    color = if (isToday) cs.onPrimary else cs.onSurface,
+                    fontWeight = if (has || isToday || selected) FontWeight.Bold else FontWeight.Normal,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            if (special) Icon(Icons.Rounded.Star, null, Modifier.size(11.dp), tint = cs.tertiary)
         }
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -519,10 +530,25 @@ fun DaySheet(vm: MainVM, date: LocalDate, persons: List<Person>, works: List<Wor
     val e = date.toEpochDay()
     val dayTotal = ov[e] ?: def
     val n = works.size
+    val specials by vm.specials.collectAsState()
+    val sp = specials.firstOrNull { it.matches(date) }
+    var specialDialog by remember { mutableStateOf(false) }
     ModalBottomSheet(onDismissRequest = onClose) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState())) {
             Text(dateTitle(date), style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(8.dp))
+            AssistChip(
+                onClick = { specialDialog = true },
+                label = { Text(if (sp != null) "${sp.label} ×${fmtMult(sp.multiplier)}" else "Pago especial para este día") },
+                leadingIcon = { Icon(Icons.Rounded.Star, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.tertiary) }
+            )
+            Spacer(Modifier.height(8.dp))
+            if (specialDialog) SpecialDayDialog(
+                initial = sp ?: SpecialDay(label = "Día especial", month = date.monthValue, day = date.dayOfMonth, year = date.year, multiplier = 2.0),
+                onDismiss = { specialDialog = false },
+                onDelete = { vm.deleteSpecial(it); specialDialog = false },
+                onSave = { s, apply -> vm.saveSpecial(s, apply); specialDialog = false }
+            )
             if (persons.isEmpty()) Text("Primero agregá personas en la pestaña Personas.")
             persons.forEachIndexed { i, p ->
                 PersonDayRow(vm, date, p, colorOf(i), works.firstOrNull { it.personId == p.id })
@@ -585,6 +611,7 @@ fun SummaryScreen(vm: MainVM) {
     val def by vm.defaultExpense.collectAsState()
     var all by rememberSaveable { mutableStateOf(false) }
     var export by remember { mutableStateOf(false) }
+    var showImport by remember { mutableStateOf(false) }
     val days = if (all) allDays else monthDays
     val counts = remember(days) { countsOf(days) }
 
@@ -593,11 +620,18 @@ fun SummaryScreen(vm: MainVM) {
             FilterChip(selected = !all, onClick = { all = false }, label = { Text("Este mes") })
             Spacer(Modifier.width(8.dp))
             FilterChip(selected = all, onClick = { all = true }, label = { Text("Todo el historial") })
-            Spacer(Modifier.weight(1f))
-            FilledTonalButton(onClick = { export = true }, contentPadding = PaddingValues(horizontal = 14.dp)) {
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(onClick = { export = true }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Rounded.FileDownload, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Excel")
+                Text("Exportar Excel")
+            }
+            OutlinedButton(onClick = { showImport = true }, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Rounded.FileUpload, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Importar")
             }
         }
         if (!all) MonthHeader(vm) else Spacer(Modifier.height(12.dp))
@@ -644,6 +678,7 @@ fun SummaryScreen(vm: MainVM) {
         Spacer(Modifier.height(8.dp))
     }
     if (export) ExportDialog(vm, startAll = all) { export = false }
+    if (showImport) ImportDialog(vm) { showImport = false }
 }
 
 /* ---------- Personas ---------- */
@@ -683,6 +718,7 @@ fun PeopleScreen(vm: MainVM) {
                     }
                 }
             }
+            item { SpecialDaysCard(vm) }
             if (persons.isEmpty()) item {
                 Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Rounded.Group, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.outline)
@@ -808,6 +844,7 @@ fun PlanillaScreen(vm: MainVM) {
     val def by vm.defaultExpense.collectAsState()
     var sheetDate by remember { mutableStateOf<LocalDate?>(null) }
     val dates = remember(days) { days.map { it.date }.distinct().sorted() }
+    val specials by vm.specials.collectAsState()
 
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { MonthHeader(vm) }
@@ -833,6 +870,9 @@ fun PlanillaScreen(vm: MainVM) {
                         Row(Modifier.fillMaxWidth().clickable { sheetDate = d }, verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(d.format(DateTimeFormatter.ofPattern("EEEE d 'de' MMMM", AR)).cap(), style = MaterialTheme.typography.titleSmall)
+                                specials.firstOrNull { it.matches(d) }?.let { sp ->
+                                    Text("★ ${sp.label} ×${fmtMult(sp.multiplier)}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
+                                }
                                 Text(
                                     works.joinToString(" · ") { w -> (persons.firstOrNull { it.id == w.personId }?.name ?: "?") + " " + moneyShort(w.pay) },
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -931,6 +971,180 @@ fun ExportDialog(vm: MainVM, startAll: Boolean, onDismiss: () -> Unit) {
                 TextButton(onClick = { saver.launch(fileName) }) { Text("Guardar") }
             }
         },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+/* ---------- Días especiales (pago multiplicado) ---------- */
+
+@Composable
+fun SpecialDaysCard(vm: MainVM) {
+    val specials by vm.specials.collectAsState()
+    var editing by remember { mutableStateOf<SpecialDay?>(null) }
+    SoftCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Star, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.tertiary)
+                Spacer(Modifier.width(8.dp))
+                Text("Días especiales", style = MaterialTheme.typography.titleSmall)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Feriados u otros días con pago distinto, por ejemplo doble. Se aplica solo al marcar esos días.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            specials.sortedWith(compareBy({ it.month }, { it.day }, { it.year })).forEach { s ->
+                Row(Modifier.fillMaxWidth().clickable { editing = s }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(s.label, style = MaterialTheme.typography.titleSmall)
+                        Text(specialDateText(s), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.tertiaryContainer) {
+                        Text(
+                            "×" + fmtMult(s.multiplier), Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.onTertiaryContainer, fontWeight = FontWeight.Bold
+                        )
+                    }
+                    IconButton(onClick = { vm.deleteSpecial(s) }) { Icon(Icons.Rounded.Delete, "Quitar") }
+                }
+            }
+            if (specials.isEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = { editing = SpecialDay(label = "Navidad", month = 12, day = 25, year = 0, multiplier = 2.0) }, label = { Text("+ Navidad ×2") })
+                AssistChip(onClick = { editing = SpecialDay(label = "Año Nuevo", month = 1, day = 1, year = 0, multiplier = 2.0) }, label = { Text("+ Año Nuevo ×2") })
+            }
+            TextButton(onClick = {
+                val t = LocalDate.now()
+                editing = SpecialDay(label = "Día especial", month = t.monthValue, day = t.dayOfMonth, year = 0, multiplier = 2.0)
+            }) {
+                Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Agregar día especial")
+            }
+        }
+    }
+    editing?.let { s ->
+        SpecialDayDialog(
+            initial = s, onDismiss = { editing = null },
+            onDelete = { vm.deleteSpecial(it); editing = null },
+            onSave = { sd, apply -> vm.saveSpecial(sd, apply); editing = null }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SpecialDayDialog(initial: SpecialDay, onDismiss: () -> Unit, onDelete: (SpecialDay) -> Unit, onSave: (SpecialDay, Boolean) -> Unit) {
+    var label by remember { mutableStateOf(initial.label) }
+    var date by remember {
+        val y = if (initial.year == 0) LocalDate.now().year else initial.year
+        val ym = YearMonth.of(y, initial.month)
+        mutableStateOf(ym.atDay(minOf(initial.day, ym.lengthOfMonth())))
+    }
+    var yearly by remember { mutableStateOf(initial.year == 0) }
+    var mult by remember { mutableStateOf(fmtMult(initial.multiplier)) }
+    var apply by remember { mutableStateOf(true) }
+    var picker by remember { mutableStateOf(false) }
+    val m = mult.toAmount()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.Star, null) },
+        title = { Text(if (initial.id == 0L) "Día especial" else "Editar día especial") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(label, { label = it }, label = { Text("Nombre (ej. Navidad)") }, singleLine = true)
+                OutlinedButton(onClick = { picker = true }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Rounded.CalendarMonth, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(date.format(DateTimeFormatter.ofPattern(if (yearly) "d 'de' MMMM" else "d 'de' MMMM yyyy", AR)))
+                }
+                Row(Modifier.fillMaxWidth().clickable { yearly = !yearly }, verticalAlignment = Alignment.CenterVertically) {
+                    Switch(checked = yearly, onCheckedChange = { yearly = it })
+                    Spacer(Modifier.width(10.dp))
+                    Text("Se repite todos los años")
+                }
+                Text("El pago se multiplica por", style = MaterialTheme.typography.titleSmall)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(1.5, 2.0, 3.0).forEach { k ->
+                        FilterChip(selected = m == k, onClick = { mult = fmtMult(k) }, label = { Text("×" + fmtMult(k)) })
+                    }
+                }
+                OutlinedTextField(
+                    mult, { mult = it }, label = { Text("Multiplicador") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                )
+                Row(Modifier.fillMaxWidth().clickable { apply = !apply }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(apply, { apply = it })
+                    Text("Aplicar al pago de los días ya cargados en esa fecha", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = m != null && m > 0.0, onClick = {
+                onSave(
+                    SpecialDay(
+                        id = initial.id, label = label.trim().ifBlank { "Día especial" },
+                        month = date.monthValue, day = date.dayOfMonth, year = if (yearly) 0 else date.year,
+                        multiplier = m ?: 2.0
+                    ),
+                    apply
+                )
+            }) { Text("Guardar") }
+        },
+        dismissButton = {
+            Row {
+                if (initial.id != 0L) TextButton(onClick = { onDelete(initial) }) { Text("Quitar") }
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            }
+        }
+    )
+
+    if (picker) {
+        val st = rememberDatePickerState(initialSelectedDateMillis = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
+        DatePickerDialog(
+            onDismissRequest = { picker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    st.selectedDateMillis?.let { date = Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
+                    picker = false
+                }) { Text("Listo") }
+            },
+            dismissButton = { TextButton(onClick = { picker = false }) { Text("Cancelar") } }
+        ) { DatePicker(state = st) }
+    }
+}
+
+/* ---------- Importar una planilla exportada por la app ---------- */
+
+@Composable
+fun ImportDialog(vm: MainVM, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) {
+            onDismiss()
+        } else {
+            val data = try { ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } } catch (e: Exception) { null }
+            if (data == null) {
+                Toast.makeText(ctx, "No se pudo abrir el archivo", Toast.LENGTH_LONG).show()
+                onDismiss()
+            } else {
+                vm.importXlsx(data) { msg -> Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show(); onDismiss() }
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.FileUpload, null) },
+        title = { Text("Importar desde Excel") },
+        text = {
+            Text(
+                "Elegí una planilla que exportó esta app. Se cargan los días con su pago y viático, las personas con sus tarifas y los días especiales. " +
+                    "Lo que ya existe en esas fechas se actualiza; no se borra nada.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        },
+        confirmButton = { TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("Elegir archivo") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
     )
 }

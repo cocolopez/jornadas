@@ -43,16 +43,25 @@ object XlsxExporter {
     private val STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;$&quot;\ #,##0.00"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="14"/><name val="Calibri"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F766E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD3F1EA"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="164" fontId="1" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="0" fontId="1" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center"/></xf><xf numFmtId="1" fontId="1" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"""
 
-    fun build(persons: List<Person>, works: List<Workday>, ov: Map<Long, Double>, def: Double, period: String): ByteArray {
+    /** Nombre de hoja válido para Excel (sin []:*?/\\ y hasta 31 letras). */
+    fun sanitizeName(raw: String): String = raw.filter { it !in "[]:*?/\\" }.trim().take(31).ifBlank { "Persona" }
+
+    private fun mult(m: Double) = if (m % 1.0 == 0.0) m.toLong().toString() else m.toString()
+
+    fun build(
+        persons: List<Person>, works: List<Workday>, ov: Map<Long, Double>, def: Double,
+        specials: List<SpecialDay>, period: String
+    ): ByteArray {
         val counts = works.groupingBy { it.date }.eachCount()
         fun part(w: Workday): Double = (ov[w.date] ?: def) / (counts[w.date] ?: 1)
-        val used = mutableSetOf("Resumen", "Por mes")
+        val used = mutableSetOf("Resumen", "Por mes", "Personas", "Especiales")
         val sheets = mutableListOf<Pair<String, String>>()
         val names = persons.associate { it.id to it.name }
 
         // ---- Resumen: total por persona ----
         val r1 = mutableListOf(
             row(1, t(0, 1, "Jornadas — $period", 6)),
+            row(2, t(0, 2, "Viático estándar por día"), n(2, 2, def, 2)),
             headers(3, "Persona", "Días", "Pago", "Viáticos", "Total")
         )
         var r = 4
@@ -100,11 +109,29 @@ object XlsxExporter {
         }
         sheets += "Por mes" to sheet(listOf(18, 22, 10, 16, 16, 16), r2, true)
 
+        // ---- Personas (tarifas) ----
+        val r3 = mutableListOf(headers(1, "Nombre", "Pago base", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"))
+        persons.forEachIndexed { k, p ->
+            val rw = k + 2
+            val cells = mutableListOf(t(0, rw, p.name), n(1, rw, p.dailyPay, 2))
+            p.weekdayRates().forEachIndexed { j, v -> if (v != null) cells += n(2 + j, rw, v, 2) }
+            r3 += row(rw, *cells.toTypedArray())
+        }
+        sheets += "Personas" to sheet(listOf(22, 14, 12, 12, 12, 12, 12, 12, 12), r3, true)
+
+        // ---- Días especiales ----
+        val r4 = mutableListOf(headers(1, "Etiqueta", "Mes", "Día", "Año (0 = todos los años)", "Multiplicador"))
+        specials.forEachIndexed { k, s ->
+            val rw = k + 2
+            r4 += row(rw, t(0, rw, s.label), n(1, rw, s.month.toDouble(), 7), n(2, rw, s.day.toDouble(), 7), n(3, rw, s.year.toDouble(), 7), n(4, rw, s.multiplier, 0))
+        }
+        sheets += "Especiales" to sheet(listOf(22, 8, 8, 24, 14), r4, true)
+
         // ---- Una hoja por persona ----
         for (p in persons) {
             val ws = works.filter { it.personId == p.id }.sortedBy { it.date }
             val rr = mutableListOf(
-                headers(1, "Fecha", "Día", "Lugar / nota", "Pago", "Viático del día (total)", "Van", "Viático (su parte)", "Total del día")
+                headers(1, "Fecha", "Día", "Lugar / nota", "Pago", "Viático del día (total)", "Van", "Viático (su parte)", "Total del día", "Día especial")
             )
             var sumPay = 0.0; var sumPart = 0.0
             ws.forEachIndexed { i, w ->
@@ -119,7 +146,8 @@ object XlsxExporter {
                     t(1, rw, d.dayOfWeek.getDisplayName(TextStyle.FULL, AR).replaceFirstChar { it.uppercase() }),
                     t(2, rw, w.note),
                     n(3, rw, w.pay, 2), n(4, rw, dayExp, 2), n(5, rw, cnt.toDouble(), 7),
-                    f(6, rw, "E$rw/F$rw", pt, 2), f(7, rw, "D$rw+G$rw", w.pay + pt, 2)
+                    f(6, rw, "E$rw/F$rw", pt, 2), f(7, rw, "D$rw+G$rw", w.pay + pt, 2),
+                    t(8, rw, specials.firstOrNull { it.matches(d) }?.let { "${it.label} ×${mult(it.multiplier)}" } ?: "")
                 )
                 sumPay += w.pay; sumPart += pt
             }
@@ -132,12 +160,12 @@ object XlsxExporter {
                 )
             } else rr += row(2, t(0, 2, "Sin días en este período"))
 
-            val base = p.name.filter { it !in "[]:*?/\\" }.trim().take(31).ifBlank { "Persona" }
+            val base = sanitizeName(p.name)
             var nm = base
             var k = 2
             while (nm in used) { nm = base.take(28) + " $k"; k++ }
             used += nm
-            sheets += nm to sheet(listOf(12, 13, 22, 16, 20, 7, 18, 16), rr, true)
+            sheets += nm to sheet(listOf(12, 13, 22, 16, 20, 7, 18, 16, 20), rr, true)
         }
 
         // ---- Empaquetar ----

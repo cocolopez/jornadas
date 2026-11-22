@@ -12,7 +12,7 @@ android {
         targetSdk = 34
         // versionCode sube solo con cada compilación (minutos desde 1970) para poder actualizar sobre la versión anterior
         versionCode = (System.currentTimeMillis() / 60000L).toInt()
-        versionName = "1.6"
+        versionName = "1.7"
     }
     // Clave fija: así todas las versiones se firman igual y Android las instala como actualización
     signingConfigs {

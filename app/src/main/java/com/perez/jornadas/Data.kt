@@ -48,6 +48,18 @@ data class Workday(
     val note: String = ""
 )
 
+/** Día con pago especial (por ejemplo Navidad ×2). year = 0 significa "todos los años". */
+@Entity(tableName = "special_day")
+data class SpecialDay(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val label: String,
+    val month: Int,
+    val day: Int,
+    val year: Int = 0,
+    val multiplier: Double = 2.0
+)
+fun SpecialDay.matches(d: LocalDate): Boolean = d.monthValue == month && d.dayOfMonth == day && (year == 0 || d.year == year)
+
 /** Viático total de un día (se reparte entre las personas que van). Si no hay fila, vale el viático estándar. */
 @Entity(tableName = "day_expense")
 data class DayExpense(@PrimaryKey val date: Long, val amount: Double)
@@ -66,6 +78,10 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertWorkdays(list: List<Workday>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertWorkdays(list: List<Workday>)
     @Query("SELECT * FROM workday WHERE personId = :pid") suspend fun workdaysOfPerson(pid: Long): List<Workday>
+    @Query("SELECT * FROM special_day ORDER BY month, day") fun specialDays(): Flow<List<SpecialDay>>
+    @Insert suspend fun insertSpecial(s: SpecialDay): Long
+    @Update suspend fun updateSpecial(s: SpecialDay)
+    @Delete suspend fun deleteSpecial(s: SpecialDay)
     @Query("SELECT * FROM workday ORDER BY date") fun allWorkdays(): Flow<List<Workday>>
     @Query("SELECT * FROM day_expense") fun dayExpenses(): Flow<List<DayExpense>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun setDayExpense(e: DayExpense)
@@ -91,14 +107,20 @@ private val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
-@Database(entities = [Person::class, Workday::class, DayExpense::class], version = 3, exportSchema = false)
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS special_day (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, label TEXT NOT NULL, month INTEGER NOT NULL, day INTEGER NOT NULL, year INTEGER NOT NULL, multiplier REAL NOT NULL)")
+    }
+}
+
+@Database(entities = [Person::class, Workday::class, DayExpense::class, SpecialDay::class], version = 4, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): AppDao
     companion object {
         @Volatile private var inst: AppDb? = null
         fun get(c: Context): AppDb = inst ?: synchronized(this) {
             inst ?: Room.databaseBuilder(c.applicationContext, AppDb::class.java, "jornadas.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build().also { inst = it }
         }
     }
@@ -112,6 +134,25 @@ class MainVM(app: Application) : AndroidViewModel(app) {
     val workdays = month.flatMapLatest { m ->
         dao.workdays(m.atDay(1).toEpochDay(), m.atEndOfMonth().toEpochDay())
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    // ----- Días especiales (pago multiplicado) -----
+    val specials = dao.specialDays().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    /** Pago de una persona en una fecha: tarifa del día de la semana por el multiplicador del día especial (si lo hay). */
+    fun payOf(p: Person, d: LocalDate): Double = p.payFor(d) * (specials.value.firstOrNull { it.matches(d) }?.multiplier ?: 1.0)
+
+    fun saveSpecial(sd: SpecialDay, applyToExisting: Boolean) = viewModelScope.launch {
+        val id = if (sd.id == 0L) dao.insertSpecial(sd) else { dao.updateSpecial(sd); sd.id }
+        if (applyToExisting) {
+            val saved = sd.copy(id = id)
+            val byId = persons.value.associateBy { it.id }
+            val list = allWorkdays.value.filter { saved.matches(LocalDate.ofEpochDay(it.date)) }.mapNotNull { w ->
+                byId[w.personId]?.let { p -> w.copy(pay = p.payFor(LocalDate.ofEpochDay(w.date)) * saved.multiplier) }
+            }
+            if (list.isNotEmpty()) dao.upsertWorkdays(list)
+        }
+    }
+
+    fun deleteSpecial(sd: SpecialDay) = viewModelScope.launch { dao.deleteSpecial(sd) }
 
     // ----- Viáticos: un total por día, repartido entre los que van -----
     private val prefs = app.getSharedPreferences("app", Context.MODE_PRIVATE)
@@ -138,7 +179,89 @@ class MainVM(app: Application) : AndroidViewModel(app) {
             val to = month.atEndOfMonth().toEpochDay()
             all.filter { it.date in from..to }
         }
-        return XlsxExporter.build(persons.value, ws, dayExpenses.value, defaultExpense.value, period)
+        return XlsxExporter.build(persons.value, ws, dayExpenses.value, defaultExpense.value, specials.value, period)
+    }
+
+    // ----- Importar una planilla exportada por la app -----
+    fun importXlsx(bytes: ByteArray, onDone: (String) -> Unit) = viewModelScope.launch {
+        val msg = try { doImport(bytes) } catch (e: Exception) {
+            "No pude leer el archivo. ¿Es una planilla Excel exportada por esta app?"
+        }
+        onDone(msg)
+    }
+
+    private suspend fun doImport(bytes: ByteArray): String {
+        val wb = XlsxReader.read(bytes)
+        val reserved = setOf("Resumen", "Por mes", "Personas", "Especiales")
+        val existing = persons.value.toMutableList()
+        fun key(s: String) = s.trim().lowercase()
+        var newPersons = 0
+        var newSpecials = 0
+
+        // Personas y tarifas
+        wb["Personas"]?.let { sh ->
+            for (r in 2..sh.maxRow) {
+                val name = sh[r, 0] ?: continue
+                val base = sh.num(r, 1) ?: 0.0
+                val wp = (0..6).joinToString(",") { sh.num(r, 2 + it)?.toString() ?: "" }
+                val cur = existing.firstOrNull { key(it.name) == key(name) }
+                if (cur == null) {
+                    val p = Person(name = name.trim(), dailyPay = base, weekdayPays = wp)
+                    existing.add(p.copy(id = dao.insertPerson(p)))
+                    newPersons++
+                } else {
+                    val upd = cur.copy(dailyPay = base, weekdayPays = wp)
+                    dao.updatePerson(upd)
+                    existing[existing.indexOf(cur)] = upd
+                }
+            }
+        }
+        // Viático estándar (solo si todavía no lo cargaste)
+        wb["Resumen"]?.num(2, 2)?.let { if (it > 0.0 && defaultExpense.value == 0.0) setDefaultExpense(it) }
+        // Días especiales
+        wb["Especiales"]?.let { sh ->
+            val cur = specials.value
+            for (r in 2..sh.maxRow) {
+                val mo = sh.num(r, 1)?.toInt() ?: continue
+                val d = sh.num(r, 2)?.toInt() ?: continue
+                if (mo !in 1..12 || d !in 1..31) continue
+                val y = sh.num(r, 3)?.toInt() ?: 0
+                val m = sh.num(r, 4)?.takeIf { it > 0.0 } ?: 2.0
+                val label = sh[r, 0] ?: "Día especial"
+                val same = cur.firstOrNull { it.month == mo && it.day == d && it.year == y }
+                if (same == null) { dao.insertSpecial(SpecialDay(label = label, month = mo, day = d, year = y, multiplier = m)); newSpecials++ }
+                else dao.updateSpecial(same.copy(label = label, multiplier = m))
+            }
+        }
+        // Días de cada persona
+        val work = ArrayList<Workday>()
+        val dayExp = HashMap<Long, Double>()
+        for ((name, sh) in wb) {
+            if (name in reserved || sh[1, 0] != "Fecha") continue
+            val found = existing.firstOrNull { XlsxExporter.sanitizeName(it.name).equals(name, ignoreCase = true) }
+                ?: existing.firstOrNull { key(it.name) == key(name) }
+            val person = found ?: run {
+                val p = Person(name = name.trim())
+                val np = p.copy(id = dao.insertPerson(p))
+                existing.add(np); newPersons++
+                np
+            }
+            for (r in 2..sh.maxRow) {
+                val serial = sh.num(r, 0) ?: break      // fila TOTAL o vacía: termina
+                val date = serial.toLong() - 25569
+                work.add(Workday(personId = person.id, date = date, pay = sh.num(r, 3) ?: 0.0, expenses = 0.0, note = sh[r, 2] ?: ""))
+                sh.num(r, 4)?.let { dayExp[date] = it }
+            }
+        }
+        if (work.isEmpty() && newPersons == 0 && newSpecials == 0) return "No encontré días en el archivo."
+        if (work.isNotEmpty()) dao.upsertWorkdays(work)
+        val def = defaultExpense.value
+        for ((date, v) in dayExp) {
+            if (kotlin.math.abs(v - def) > 0.005) dao.setDayExpense(DayExpense(date, v)) else dao.clearDayExpense(date)
+        }
+        return "Listo: ${work.size} días cargados" +
+            (if (newPersons > 0) ", $newPersons personas nuevas" else "") +
+            (if (newSpecials > 0) ", $newSpecials días especiales" else "") + "."
     }
 
     // ----- Selección de varios días -----
@@ -161,7 +284,7 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         val out = ArrayList<Workday>()
         for (d in days) for (p in people) {
             val cur = existing.firstOrNull { it.date == d && it.personId == p.id }
-            out += if (cur == null) Workday(personId = p.id, date = d, pay = pay ?: p.payFor(LocalDate.ofEpochDay(d)), expenses = 0.0)
+            out += if (cur == null) Workday(personId = p.id, date = d, pay = pay ?: payOf(p, LocalDate.ofEpochDay(d)), expenses = 0.0)
             else cur.copy(pay = pay ?: cur.pay)
         }
         dao.upsertWorkdays(out)
@@ -207,7 +330,7 @@ class MainVM(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggle(p: Person, date: LocalDate, on: Boolean) = viewModelScope.launch {
-        if (on) dao.upsertWorkday(Workday(personId = p.id, date = date.toEpochDay(), pay = p.payFor(date), expenses = 0.0))
+        if (on) dao.upsertWorkday(Workday(personId = p.id, date = date.toEpochDay(), pay = payOf(p, date), expenses = 0.0))
         else dao.deleteWorkday(p.id, date.toEpochDay())
     }
 
@@ -217,7 +340,7 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         val id = if (p.id == 0L) dao.insertPerson(p) else { dao.updatePerson(p); p.id }
         if (applyToExisting) {
             val person = p.copy(id = id)
-            dao.upsertWorkdays(dao.workdaysOfPerson(id).map { it.copy(pay = person.payFor(LocalDate.ofEpochDay(it.date))) })
+            dao.upsertWorkdays(dao.workdaysOfPerson(id).map { it.copy(pay = payOf(person, LocalDate.ofEpochDay(it.date))) })
         }
     }
 
