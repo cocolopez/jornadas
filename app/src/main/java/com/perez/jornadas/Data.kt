@@ -89,6 +89,7 @@ interface AppDao {
     @Query("DELETE FROM day_expense WHERE date = :date") suspend fun clearDayExpense(date: Long)
     @Query("DELETE FROM day_expense WHERE date IN (:dates)") suspend fun clearDayExpenses(dates: List<Long>)
     @Query("SELECT * FROM workday WHERE date IN (:dates)") suspend fun workdaysOn(dates: List<Long>): List<Workday>
+    @Query("DELETE FROM workday WHERE date IN (:dates)") suspend fun deleteWorkdaysOn(dates: List<Long>)
     @Query("DELETE FROM workday WHERE personId = :pid AND date = :date")
     suspend fun deleteWorkday(pid: Long, date: Long)
     @Query("UPDATE workday SET pay = :pay, expenses = :exp WHERE personId = :pid")
@@ -296,6 +297,14 @@ class MainVM(app: Application) : AndroidViewModel(app) {
         val ids = assignees.value
         val list = dao.workdaysOn(selected.value.toList()).filter { it.personId in ids }.map { it.copy(pay = pay) }
         if (list.isNotEmpty()) dao.upsertWorkdays(list)
+    }
+
+    /** Borra a todas las personas de los días elegidos (y el viático especial de esos días). */
+    fun clearSelectedDays() = viewModelScope.launch {
+        val days = selected.value.toList()
+        if (days.isEmpty()) return@launch
+        dao.deleteWorkdaysOn(days)
+        dao.clearDayExpenses(days)
     }
 
     fun unassign() = viewModelScope.launch {

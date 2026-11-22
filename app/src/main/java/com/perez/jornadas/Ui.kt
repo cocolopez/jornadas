@@ -41,8 +41,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
@@ -185,12 +187,46 @@ fun SoftCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() 
 }
 
 @Composable
-fun StatPill(icon: ImageVector, label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier.clip(RoundedCornerShape(16.dp)).background(Color.White.copy(alpha = 0.18f)).padding(10.dp)) {
-        Icon(icon, null, Modifier.size(18.dp), tint = Color.White)
+fun StatPill(icon: ImageVector, label: String, value: String, modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Column(modifier.clip(RoundedCornerShape(16.dp)).background(tint.copy(alpha = 0.18f)).padding(10.dp)) {
+        Icon(icon, null, Modifier.size(18.dp), tint = tint)
         Spacer(Modifier.height(6.dp))
-        Text(value, color = Color.White, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-        Text(label, color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall)
+        Text(value, color = tint, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+        Text(label, color = tint.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Texto blanco sobre colores oscuros y oscuro sobre colores claros, para que siempre se lea. */
+private fun onColorOf(c: Color): Color = if (c.luminance() > 0.30f) Color(0xFF1E211F) else Color.White
+
+/** Tarjeta con el total de una persona, pintada con el color que tiene asignado. */
+@Composable
+fun PersonTotalCard(name: String, color: Color, daysCount: Int, pay: Double, exp: Double, modifier: Modifier = Modifier) {
+    val fg = onColorOf(color)
+    Column(
+        modifier.fillMaxWidth().clip(MaterialTheme.shapes.large)
+            .background(Brush.linearGradient(listOf(color, color.copy(alpha = 0.8f))))
+            .padding(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(42.dp).background(fg.copy(alpha = 0.2f), CircleShape), contentAlignment = Alignment.Center) {
+                Text(name.trim().take(1).uppercase(), color = fg, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(name, color = fg, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (daysCount == 1) "1 día" else "$daysCount días",
+                    color = fg.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Text(animatedMoney(pay + exp), color = fg, style = MaterialTheme.typography.titleLarge)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatPill(Icons.Rounded.Payments, "Pago", animatedMoney(pay, short = true), Modifier.weight(1f), fg)
+            StatPill(Icons.Rounded.ReceiptLong, "Viáticos", animatedMoney(exp, short = true), Modifier.weight(1f), fg)
+        }
     }
 }
 
@@ -288,6 +324,9 @@ fun CalendarScreen(vm: MainVM) {
     val selected by vm.selected.collectAsState()
     val assignees by vm.assignees.collectAsState()
     val specials by vm.specials.collectAsState()
+    val ov by vm.dayExpenses.collectAsState()
+    val def by vm.defaultExpense.collectAsState()
+    val counts = remember(days) { countsOf(days) }
     var sheetDate by remember { mutableStateOf<LocalDate?>(null) }
 
     Box(Modifier.fillMaxSize()) {
@@ -338,7 +377,18 @@ fun CalendarScreen(vm: MainVM) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            TotalCard(vm, days)
+            if (persons.isNotEmpty()) {
+                Text("Total del mes por persona", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
+            }
+            persons.forEachIndexed { i, p ->
+                val ws = days.filter { it.personId == p.id }
+                PersonTotalCard(
+                    p.name, colorOf(i), ws.size,
+                    ws.sumOf { it.pay }, ws.sumOf { expOf(it, counts, ov, def) }
+                )
+                Spacer(Modifier.height(10.dp))
+            }
             Spacer(Modifier.height(if (selecting) 480.dp else 16.dp))
         }
 
@@ -404,6 +454,7 @@ fun SelectionPanel(vm: MainVM, persons: List<Person>, month: YearMonth, selected
     var showAmounts by remember { mutableStateOf(false) }
     var pay by remember { mutableStateOf("") }
     var exp by remember { mutableStateOf("") }
+    var confirmClear by remember { mutableStateOf(false) }
     val monthDays = (1..month.lengthOfMonth()).map { month.atDay(it) }
     val ready = selected.isNotEmpty() && assignees.isNotEmpty()
 
@@ -497,8 +548,26 @@ fun SelectionPanel(vm: MainVM, persons: List<Person>, month: YearMonth, selected
                     Text("Quitar")
                 }
             }
+            if (selected.isNotEmpty()) OutlinedButton(
+                onClick = { confirmClear = true },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+            ) {
+                Icon(Icons.Rounded.DeleteSweep, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Borrar todo lo seleccionado")
+            }
         }
     }
+    if (confirmClear) AlertDialog(
+        onDismissRequest = { confirmClear = false },
+        icon = { Icon(Icons.Rounded.DeleteSweep, null) },
+        title = { Text("¿Borrar " + (if (selected.size == 1) "el día elegido?" else "los ${selected.size} días elegidos?")) },
+        text = { Text("Se quita a todas las personas de esos días y se borra su viático especial. No se puede deshacer.") },
+        confirmButton = { TextButton(onClick = { vm.clearSelectedDays(); confirmClear = false }) { Text("Borrar") } },
+        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancelar") } }
+    )
 }
 
 @Composable
